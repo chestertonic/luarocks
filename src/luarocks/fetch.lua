@@ -5,6 +5,7 @@ local fetch = {}
 local fs = require("luarocks.fs")
 local dir = require("luarocks.dir")
 local rockspecs = require("luarocks.rockspecs")
+local signing = require("luarocks.signing")
 local persist = require("luarocks.persist")
 local util = require("luarocks.util")
 local cfg = require("luarocks.core.cfg")
@@ -128,19 +129,35 @@ end
 -- a permanent destination.
 -- @return string or (nil, string, [string]): the directory containing the contents
 -- of the unpacked rock.
-function fetch.fetch_and_unpack_rock(rock_file, dest)
-   assert(type(rock_file) == "string")
+function fetch.fetch_and_unpack_rock(url, dest, verify)
+   assert(type(url) == "string")
    assert(type(dest) == "string" or not dest)
 
-   local name = dir.base_name(rock_file):match("(.*)%.[^.]*%.rock")
-   
-   local err, errcode
-   rock_file, err, errcode = fetch.fetch_url_at_temp_dir(rock_file,"luarocks-rock-"..name)
+   local name = dir.base_name(url):match("(.*)%.[^.]*%.rock")
+
+   local rock_file, err, errcode = fetch.fetch_url_at_temp_dir(url, "luarocks-rock-" .. name)
    if not rock_file then
       return nil, "Could not fetch rock file: " .. err, errcode
    end
 
+   local sig_file
+   if verify then
+      local sig_url = signing.signature_url(url)
+      sig_file, err, errcode = fetch.fetch_url_at_temp_dir(sig_url, "luarocks-rock-" .. name)
+      if not sig_file then
+         return nil, "Could not fetch signature file for verification: " .. err, errcode
+      end
+      
+      local ok, err = signing.verify_signature(rock_file, sig_file)
+      if not ok then
+         return nil, "Failed signature verification: " .. err
+      end
+
+      sig_file = fs.absolute_name(sig_file)
+   end
+
    rock_file = fs.absolute_name(rock_file)
+
    local unpack_dir
    if dest then
       unpack_dir = dest
@@ -162,6 +179,12 @@ function fetch.fetch_and_unpack_rock(rock_file, dest)
    ok, err = fs.unzip(rock_file)
    if not ok then
       return nil, "Failed unpacking rock file: " .. rock_file .. ": " .. err
+   end
+   if sig_file then
+      ok, err = fs.copy(sig_file, ".")
+      if not ok then
+         return nil, "Failed copying signature file"
+      end
    end
    fs.pop_dir()
    return unpack_dir
